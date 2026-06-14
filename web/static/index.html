@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>咨询AI副驾</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- 顶部控制栏 -->
+    <header class="toolbar">
+        <div class="toolbar-left">
+            <h1 class="title">咨询AI副驾</h1>
+            <select id="modeSelect" class="mode-select">
+                <option value="free-consult">免费咨询</option>
+                <option value="paid-consult">付费咨询</option>
+                <option value="coaching">陪跑复盘</option>
+            </select>
+            <span id="statusBadge" class="status-badge idle">待命</span>
+        </div>
+        <div class="toolbar-center">
+            <span id="timer" class="timer">00:00:00</span>
+        </div>
+        <div class="toolbar-right">
+            <button id="btnStart" class="btn btn-start" onclick="startSession()">开始咨询</button>
+            <button id="btnStop" class="btn btn-stop" onclick="stopSession()" disabled>结束咨询</button>
+        </div>
+    </header>
+
+    <!-- 主内容区 -->
+    <main class="main-content">
+        <!-- 左侧：对话记录 -->
+        <section class="panel transcript-panel">
+            <h2 class="panel-title">实时对话</h2>
+            <div id="transcriptList" class="transcript-list">
+                <div class="empty-hint">点击「开始咨询」启动实时转写...</div>
+            </div>
+        </section>
+
+        <!-- 右侧：AI建议 -->
+        <section class="panel suggestion-panel">
+            <h2 class="panel-title">AI建议</h2>
+            <div id="suggestionList" class="suggestion-list">
+                <div class="empty-hint">等待对话开始...</div>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
