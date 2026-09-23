@@ -4,6 +4,7 @@
 - 检测到语音开始 → 缓冲
 - 检测到静音超过阈值 → 输出完整语音段
 """
+from __future__ import annotations
 import logging
 import numpy as np
 from dataclasses import dataclass, field

@@ -18,7 +18,15 @@ from audio.capture import DualAudioCapture
 from audio.vad import VoiceActivityDetector
 from transcriber.whisper_stream import WhisperTranscriber, Transcript
 from ai.advisor import AIAdvisor
-from web.server import app, push_transcript, push_suggestion, get_session_data, state
+from web.server import (
+    app,
+    push_transcript,
+    push_suggestion,
+    get_session_data,
+    set_mode_callback,
+    set_stop_callback,
+    state,
+)
 from archive.archiver import Archiver
 from archive.inbox_watcher import inbox_watcher
 
@@ -40,6 +48,8 @@ class ConsultCopilot:
         self.transcriber = WhisperTranscriber(output_queue=self._transcript_queue)
         self.advisor = AIAdvisor(mode="free-consult")
         self.archiver = Archiver()
+        set_mode_callback(self.advisor.set_mode)
+        set_stop_callback(self._archive_session)
 
         self._running = False
         self._ws_loop = None
@@ -88,8 +98,15 @@ class ConsultCopilot:
             daemon=True,
         ).start()
 
-        # 异步事件循环用于 WebSocket 推送
+        # 异步事件循环用于 WebSocket 推送（需在独立线程 run_forever，
+        # 否则 run_coroutine_threadsafe 提交的协程不会执行）
         self._ws_loop = asyncio.new_event_loop()
+
+        def _run_ws_loop():
+            asyncio.set_event_loop(self._ws_loop)
+            self._ws_loop.run_forever()
+
+        threading.Thread(target=_run_ws_loop, daemon=True).start()
 
         import uvicorn
         uvicorn.run(
@@ -207,6 +224,8 @@ class ConsultCopilot:
                     logger.info(f"  音频文件: {result.get('audio')}")
                 if result.get("plan"):
                     logger.info(f"  行动方案: {result.get('plan')}")
+                if result.get("material_package"):
+                    logger.info(f"  咨询材料包: {result.get('material_package')}")
         except Exception as e:
             logger.error(f"归档失败: {e}")
 

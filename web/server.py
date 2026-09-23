@@ -3,9 +3,10 @@ Web 服务模块
 - FastAPI + WebSocket 实时推送
 - 提供前端面板
 """
+from __future__ import annotations
 import asyncio
-import json
 import logging
+import threading
 import time
 from pathlib import Path
 from datetime import datetime
@@ -53,6 +54,20 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+_stop_callback = None
+_mode_callback = None
+
+
+def set_stop_callback(callback):
+    """注册结束咨询后的归档回调。"""
+    global _stop_callback
+    _stop_callback = callback
+
+
+def set_mode_callback(callback):
+    """注册咨询模式切换回调。"""
+    global _mode_callback
+    _mode_callback = callback
 
 # 全局状态
 class SessionState:
@@ -63,12 +78,14 @@ class SessionState:
         self.start_time: float | None = None
         self.transcripts: list[dict] = []       # 转写记录
         self.suggestions: list[dict] = []       # AI建议记录
+        self.is_archived = False
 
     def reset(self):
         self.is_active = False
         self.start_time = None
         self.transcripts = []
         self.suggestions = []
+        self.is_archived = False
 
     def add_transcript(self, source: str, text: str, timestamp: float):
         self.transcripts.append({
@@ -117,10 +134,12 @@ async def handle_command(data: dict):
     cmd = data.get("command")
 
     if cmd == "start":
+        state.reset()
         state.is_active = True
         state.start_time = time.time()
         state.mode = data.get("mode", "free-consult")
-        state.reset()
+        if _mode_callback:
+            _mode_callback(state.mode)
         await manager.broadcast({
             "type": "status",
             "status": "active",
@@ -131,15 +150,21 @@ async def handle_command(data: dict):
 
     elif cmd == "stop":
         state.is_active = False
+        should_archive = not state.is_archived
+        state.is_archived = True
         await manager.broadcast({
             "type": "status",
             "status": "ended",
             "duration": time.time() - state.start_time if state.start_time else 0,
         })
         logger.info("咨询结束")
+        if should_archive and _stop_callback:
+            threading.Thread(target=_stop_callback, daemon=True).start()
 
     elif cmd == "switch_mode":
         state.mode = data.get("mode", "free-consult")
+        if _mode_callback:
+            _mode_callback(state.mode)
         await manager.broadcast({
             "type": "mode_changed",
             "mode": state.mode,

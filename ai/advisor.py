@@ -10,7 +10,7 @@ import threading
 import queue
 from dataclasses import dataclass
 
-import anthropic
+from zhipuai import ZhipuAI
 
 import config
 from transcriber.whisper_stream import Transcript
@@ -35,7 +35,7 @@ class AISuggestion:
 
 
 class AIAdvisor:
-    """Claude API 实时建议器"""
+    """智谱 GLM 实时建议器"""
 
     def __init__(self, mode: str = "free-consult"):
         self.mode = mode
@@ -48,7 +48,7 @@ class AIAdvisor:
         self.output_queue = queue.Queue()
 
     def start(self):
-        self._client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        self._client = ZhipuAI(api_key=config.ZHIPUAI_API_KEY)
         self._running = True
         self._thread = threading.Thread(target=self._advise_loop, daemon=True)
         self._thread.start()
@@ -129,7 +129,7 @@ class AIAdvisor:
             task = "我刚说了这段话，请给出话术优化建议（让表达更有说服力或更自然）。"
 
         try:
-            suggestion_text = self._call_claude(task, conversation)
+            suggestion_text = self._call_glm(task, conversation)
             self._last_api_time = time.time()
 
             suggestion = AISuggestion(
@@ -151,20 +151,28 @@ class AIAdvisor:
             lines.append(f"{entry['speaker']}：{entry['text']}")
         return "\n".join(lines)
 
-    def _call_claude(self, task: str, conversation: str) -> str:
-        """调用 Claude API"""
+    def _call_glm(self, task: str, conversation: str) -> str:
+        """调用智谱 GLM API
+
+        关键差异（与 Anthropic 对比）：
+        - GLM 沿用 OpenAI 风格，system 提示词放入 messages 第一条
+        - 响应取值：response.choices[0].message.content
+        """
         system_prompt = config.MODE_PROMPTS.get(self.mode, config.MODE_PROMPTS["free-consult"])
 
-        message = self._client.messages.create(
-            model=config.CLAUDE_MODEL,
+        response = self._client.chat.completions.create(
+            model=config.GLM_MODEL,
             max_tokens=300,
-            system=system_prompt,
             messages=[
                 {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
                     "role": "user",
-                    "content": f"当前对话：\n{conversation}\n\n任务：{task}\n\n请直接给出建议，不要多余的解释。"
-                }
+                    "content": f"当前对话：\n{conversation}\n\n任务：{task}\n\n请直接给出建议，不要多余的解释。",
+                },
             ],
         )
 
-        return message.content[0].text.strip()
+        return response.choices[0].message.content.strip()

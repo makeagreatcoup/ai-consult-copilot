@@ -4,6 +4,8 @@
 - 结构：用户/{姓名}/档案.md + 咨询记录.md + 行动方案.md + 音频/
 - 档案持续更新，跨免费/付费/陪跑阶段
 """
+from __future__ import annotations
+
 import json
 import logging
 import re
@@ -11,7 +13,7 @@ from pathlib import Path
 from datetime import datetime
 
 import config
-from anthropic import Anthropic
+from zhipuai import ZhipuAI
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +21,13 @@ logger = logging.getLogger(__name__)
 
 MODE_LABELS = {
     "free-consult": "免费咨询",
+    "limited-free-diagnosis": "限时免费诊断",
+    "paid-diagnosis": "正式收费诊断",
     "paid-consult": "付费咨询",
     "coaching": "陪跑复盘",
 }
+
+FEEDBACK_PACKAGE_MODES = {"limited-free-diagnosis", "paid-diagnosis", "paid-consult"}
 
 
 def format_duration(seconds: float) -> str:
@@ -45,10 +51,12 @@ class Archiver:
         config.USER_DIR.mkdir(parents=True, exist_ok=True)
         config.SOP_DIR.mkdir(parents=True, exist_ok=True)
         config.INBOX_DIR.mkdir(parents=True, exist_ok=True)
+        config.FEEDBACK_PACKAGE_DIR.mkdir(parents=True, exist_ok=True)
+        config.ARCHIVE_PACKAGE_DIR.mkdir(parents=True, exist_ok=True)
 
-    def _get_client(self) -> Anthropic:
+    def _get_client(self) -> ZhipuAI:
         if self._client is None:
-            self._client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+            self._client = ZhipuAI(api_key=config.ZHIPUAI_API_KEY)
         return self._client
 
     # ─── 主入口 ───
@@ -120,17 +128,25 @@ class Archiver:
 
         # 4. 生成行动方案（付费咨询和陪跑模式）
         plan_path = None
-        if mode in ("paid-consult", "coaching"):
+        if mode in ("limited-free-diagnosis", "paid-diagnosis", "paid-consult", "coaching"):
             plan_path = self._generate_action_plan(
                 user_dir, user_name, date_str, date_str_cn,
                 mode_label, conversation, suggestions_text, summary
             )
+
+        # 5. 导出给 Codex 使用的 Markdown 咨询材料包
+        material_package_path = self._export_material_package(
+            mode, user_name, date_str, date_str_cn, mode_label, duration_str,
+            keyword, conversation, suggestions_text, summary, profile_data,
+            record_path, profile_path, plan_path,
+        )
 
         return {
             "record": record_path,
             "profile": profile_path,
             "audio": audio_path,
             "plan": plan_path,
+            "material_package": material_package_path,
         }
 
     # ─── 咨询记录渲染 ───
@@ -203,7 +219,7 @@ tags: [咨询, {mode_label}]
 type: 用户档案
 name: {user_name}
 first_contact: {date_str}
-status: {"付费用户" if mode_label == "付费咨询" else "免费用户"}
+status: {"付费用户" if mode_label in ("付费咨询", "正式收费诊断") else "免费用户"}
 tags: [用户档案]
 ---
 
@@ -239,7 +255,7 @@ tags: [用户档案]
         existing = profile_path.read_text(encoding="utf-8")
 
         # 更新 frontmatter 中的 status
-        if mode_label == "付费咨询" and "status: 免费用户" in existing:
+        if mode_label in ("付费咨询", "正式收费诊断") and "status: 免费用户" in existing:
             existing = existing.replace("status: 免费用户", "status: 付费用户")
         elif mode_label == "陪跑复盘":
             existing = existing.replace("status: 付费用户", "status: 陪跑学员")
@@ -337,12 +353,12 @@ AI辅助建议：
 请先用「## 咨询总结」输出总结，然后用 ```json ``` 输出用户档案JSON。"""
 
         try:
-            response = client.messages.create(
-                model=config.CLAUDE_MODEL,
+            response = client.chat.completions.create(
+                model=config.GLM_MODEL,
                 max_tokens=1000,
                 messages=[{"role": "user", "content": prompt}],
             )
-            text = response.content[0].text.strip()
+            text = response.choices[0].message.content.strip()
 
             summary = text
             profile_data = {}
@@ -428,7 +444,7 @@ AI辅助建议：
                               mode_label: str, conversation: str,
                               suggestions: str, summary: str) -> Path:
         """生成并保存行动方案"""
-        plan_content = self._call_claude_for_plan(
+        plan_content = self._call_glm_for_plan(
             mode_label, conversation, suggestions, summary
         )
 
@@ -449,7 +465,7 @@ tags: [行动方案, {mode_label}]
         logger.info(f"行动方案已保存: {plan_path}")
         return plan_path
 
-    def _call_claude_for_plan(self, mode_label: str, conversation: str,
+    def _call_glm_for_plan(self, mode_label: str, conversation: str,
                               suggestions: str, summary: str) -> str:
         """调用 Claude 生成行动方案内容"""
         client = self._get_client()
@@ -481,12 +497,137 @@ AI辅助建议：
 请直接输出 Markdown 格式的行动方案内容（不要包含 YAML frontmatter）。"""
 
         try:
-            response = client.messages.create(
-                model=config.CLAUDE_MODEL,
+            response = client.chat.completions.create(
+                model=config.GLM_MODEL,
                 max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return response.content[0].text.strip()
+            return response.choices[0].message.content.strip()
         except Exception as e:
             logger.error(f"行动方案生成失败: {e}")
             return "（自动生成失败，请根据咨询记录手动补充）"
+
+    # ─── Codex 材料包导出 ───
+
+    def _export_material_package(self, mode: str, user_name: str,
+                                 date_str: str, date_str_cn: str,
+                                 mode_label: str, duration_str: str,
+                                 keyword: str, conversation: str,
+                                 suggestions: str, summary: str,
+                                 profile_data: dict, record_path: Path,
+                                 profile_path: Path, plan_path: Path | None) -> Path:
+        """导出 Markdown 材料包，供 Codex 实时生成反馈图和夜间归档。"""
+        target_dir = (
+            config.FEEDBACK_PACKAGE_DIR
+            if mode in FEEDBACK_PACKAGE_MODES
+            else config.ARCHIVE_PACKAGE_DIR
+        )
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_user = re.sub(r'[\\/:*?"<>|]', "", user_name).strip() or "未知用户"
+        package_path = target_dir / f"{date_str}-{safe_user}-{mode_label}-咨询材料包.md"
+        feedback_status = "待生成" if mode in FEEDBACK_PACKAGE_MODES else "不需要"
+
+        content = self._render_material_package(
+            user_name=user_name,
+            date_str_cn=date_str_cn,
+            mode_label=mode_label,
+            duration_str=duration_str,
+            keyword=keyword,
+            feedback_status=feedback_status,
+            profile_data=profile_data,
+            summary=summary,
+            suggestions=suggestions,
+            conversation=conversation,
+            record_path=record_path,
+            profile_path=profile_path,
+            plan_path=plan_path,
+        )
+        package_path.write_text(content, encoding="utf-8")
+        logger.info(f"咨询材料包已导出: {package_path}")
+        return package_path
+
+    @staticmethod
+    def _render_material_package(user_name: str, date_str_cn: str,
+                                 mode_label: str, duration_str: str,
+                                 keyword: str, feedback_status: str,
+                                 profile_data: dict, summary: str,
+                                 suggestions: str, conversation: str,
+                                 record_path: Path, profile_path: Path,
+                                 plan_path: Path | None) -> str:
+        basic_info = profile_data.get("basic_info", "待补充")
+        pain_points = profile_data.get("pain_points", keyword)
+        direction = profile_data.get("direction", "待补充")
+        follow_up = profile_data.get("follow_up", "待补充")
+        plan_ref = str(plan_path) if plan_path else "无"
+
+        return f"""---
+type: 咨询材料包
+咨询类型: {mode_label}
+反馈图状态: {feedback_status}
+隐私标记: 需脱敏
+是否可转案例: 需确认
+---
+
+# 咨询材料包 - {user_name}
+
+## 咨询类型
+{mode_label}
+
+## 基本信息
+- 用户称呼：{user_name}
+- 咨询日期：{date_str_cn}
+- 咨询时长：{duration_str}
+- 本次主题：{keyword}
+
+## 用户基本信息
+{basic_info}
+
+## 本次核心问题
+{pain_points}
+
+## 核心卡点
+- 主卡点：{pain_points}
+- 次卡点：待补充
+
+## 用户原话
+请从「完整对话」中挑 1-3 句最能代表用户卡点的话。
+
+## 小导判断
+{summary}
+
+## 给出的建议
+{direction}
+
+## 行动方案
+{direction}
+
+## 反馈图要点
+- 一句话反馈：{pain_points}
+- 三个观察信号：
+  - 已经有改变意愿，但行动入口还不够清晰
+  - 需要把大目标压缩成一个低门槛动作
+  - 适合用真实场景验证，而不是继续空想路径
+- 一个行动建议：{direction}
+- 适合推荐的资料：AI入门工具清单 / 先动起来模板 / 诊断前自查表
+
+## 后续跟进
+{follow_up}
+
+## 隐私标记
+需脱敏
+
+## 是否可转案例
+需确认
+
+## 关联文件
+- 咨询记录：{record_path}
+- 用户档案：{profile_path}
+- 行动方案：{plan_ref}
+
+## AI 辅助建议
+{suggestions}
+
+## 完整对话
+{conversation}
+"""

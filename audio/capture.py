@@ -1,8 +1,12 @@
 """
 双路音频采集模块
-- 系统音频（WASAPI Loopback）：捕获腾讯会议扬声器输出
+- 系统音频：
+  - Windows：WASAPI Loopback（pyaudiowpatch）捕获腾讯会议扬声器输出
+  - macOS：BlackHole 虚拟设备捕获系统输出
 - 麦克风：捕获本地麦克风输入
 """
+from __future__ import annotations
+import sys
 import threading
 import queue
 import time
@@ -201,7 +205,12 @@ class DualAudioCapture:
 
     def __init__(self):
         self.audio_queue = queue.Queue()
-        self._system_capture = SystemAudioCapture(self.audio_queue)
+        # 平台分支：macOS 用 BlackHole，Windows 用 WASAPI Loopback
+        if sys.platform == "darwin":
+            from audio.capture_mac import SystemAudioCaptureMac
+            self._system_capture = SystemAudioCaptureMac(self.audio_queue)
+        else:
+            self._system_capture = SystemAudioCapture(self.audio_queue)
         self._mic_capture = MicrophoneCapture(self.audio_queue)
         self._running = False
 

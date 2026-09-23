@@ -3,6 +3,7 @@ faster-whisper 流式转写模块
 - 将 VAD 检测到的语音段转为文字
 - 带来源标签输出
 """
+from __future__ import annotations
 import logging
 import threading
 import queue
